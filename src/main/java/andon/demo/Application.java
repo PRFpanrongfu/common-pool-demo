@@ -4,6 +4,8 @@ import org.apache.commons.pool2.KeyedObjectPool;
 import org.apache.commons.pool2.impl.GenericKeyedObjectPool;
 import org.apache.commons.pool2.impl.GenericKeyedObjectPoolConfig;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -39,6 +41,7 @@ public class Application {
     }
 
 
+
     /**
      * 打印所有配置的默认信息
      */
@@ -62,7 +65,29 @@ public class Application {
 
     }
 
+    private static void blockAndCount(GenericKeyedObjectPool<String, FakeObject> pool){
+        CompletableFuture<Void> future = CompletableFuture.runAsync(()->{
+            int i = 1;
+            while(true) {
 
+                try {
+                    System.out.println(i++ + " active: " + pool.getNumActive("a") + " idle： " + pool.getNumIdle("a"));
+                    Thread.sleep(1000);
+
+                } catch (Exception e) {
+                }
+            }
+        });
+        try {
+            System.in.read();
+        }
+        catch (Exception e){
+
+        }
+        finally {
+            future.cancel(true);
+        }
+    }
 
     /**
      * 尝试耗尽池中元素，最终会抛出 java.util.NoSuchElementException
@@ -85,7 +110,177 @@ public class Application {
         }
     }
 
+    /**
+     * lifo实际上就是一个栈，这是有道理的
+     */
+    private static void lifo(){
+        GenericKeyedObjectPool<String, FakeObject> pool = getPool(null);
+
+        try {
+            FakeObject object1 = pool.borrowObject("a");
+            out.println(object1);
+            FakeObject object2 = pool.borrowObject("a");
+            out.println(object2);
+            pool.returnObject("a", object2);
+            pool.returnObject("a", object1);
+
+            out.println("============================");
+
+            out.println(pool.borrowObject("a"));
+            out.println(pool.borrowObject("a"));
+            out.println(pool.borrowObject("a"));
+
+        }
+        catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 在几个阶段可以测试元素是否合法，并且在不合法的时会被销毁
+     */
+    private static void validate(){
+        GenericKeyedObjectPool<String, FakeObject> pool =
+                getPool(p -> {
+                    p.setTestOnBorrow(true);
+                    p.setTestOnCreate(true);
+                    p.setTestOnReturn(true);
+                });
+        try {
+            FakeObject object = pool.borrowObject("a");
+            object.setValid(false);
+            pool.returnObject("a", object);
+
+        }
+        catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 各种关于空闲清除的测试
+     */
+    private static void evict(){
+
+        class Settings{
+            public String title;
+            public int initNum;
+        }
+
+
+        BiConsumer<GenericKeyedObjectPool<String, FakeObject>, Settings> action = (p, settings)->{
+            try {
+                out.println(settings.title);
+
+                for (int i = 0; i < settings.initNum; i++) {
+                    p.addObject("a");
+                }
+
+                blockAndCount(p);
+
+            }
+            catch (Exception e){
+                e.printStackTrace();
+            }
+        };
+
+        GenericKeyedObjectPool<String, FakeObject> pool =
+                getPool(p -> {
+                    p.setTimeBetweenEvictionRunsMillis(3000);
+                    p.setSoftMinEvictableIdleTimeMillis(1000);
+                    p.setMinIdlePerKey(1);
+                });
+        Settings settings = new Settings(){{
+            title = "first";
+            initNum = 5;
+        }};
+
+
+        /**
+         * 不evict所有，只evict3个
+         */
+        // action.accept(pool, settings);
+
+        pool =
+                getPool(p -> {
+                    p.setTimeBetweenEvictionRunsMillis(3000);
+                    p.setSoftMinEvictableIdleTimeMillis(1000);
+                    p.setMinIdlePerKey(1);
+                    p.setNumTestsPerEvictionRun(5);
+                });
+        settings = new Settings(){{
+            title = "first";
+            initNum = 5;
+        }};
+
+        /**
+         * evict所有，直到达到MinIdlePerKey
+         */
+        // action.accept(pool, settings);
+
+        pool =
+                getPool(p -> {
+                    p.setTimeBetweenEvictionRunsMillis(3000);
+                    p.setSoftMinEvictableIdleTimeMillis(1000);
+                    p.setMinIdlePerKey(1);
+                    p.setNumTestsPerEvictionRun(-1);
+                });
+        settings = new Settings(){{
+            title = "first";
+            initNum = 5;
+        }};
+
+        /**
+         * 实际上 -1 并不是代表全部清除，只是计算结果和全部清除一样
+         */
+        // action.accept(pool, settings);
+
+        pool =
+                getPool(p -> {
+                    p.setTimeBetweenEvictionRunsMillis(10000);
+                    p.setSoftMinEvictableIdleTimeMillis(1000);
+                    p.setMinEvictableIdleTimeMillis(5000);
+                    p.setMinIdlePerKey(5);
+                    p.setNumTestsPerEvictionRun(-1);
+                });
+
+        settings = new Settings(){{
+            title = "first";
+            initNum = 10;
+        }};
+
+        /**
+         * 开始想初始化10个元素，但受限于隐含的MaxTotalPerKey/MaxIdlePerKey， 只初始化了8个元素
+         * 10秒之后开始evict,soft evict会留下5(MinIdlePerKey个)，但全部满足MinEvictableIdleTimeMillis的条件
+         * 所以全部evict
+         */
+        //action.accept(pool, settings);
+
+        pool =
+                getPool(p -> {
+                    p.setTimeBetweenEvictionRunsMillis(3000);
+                    p.setSoftMinEvictableIdleTimeMillis(1000);
+                    p.setMinEvictableIdleTimeMillis(5000);
+                    p.setMinIdlePerKey(6);
+                    p.setNumTestsPerEvictionRun(-1);
+                });
+
+        settings = new Settings(){{
+            title = "first";
+            initNum = 5;
+        }};
+
+        /**
+         * 如果回收的间隔恰好在SoftMinEvictable和MinEvictable之间， 并且初始元素数（第一次evict之前）比MinIdlePerKey小，
+         * 就会造成一种现象，第一次没有满足清除条件的元素，则补全到MinIdlePerKey，第二次删除除了上一次除了补全意外的所有元素
+         * 但再补全一次，如此往复下去
+         */
+        action.accept(pool, settings);
+    }
+
+
     public static void main(String[] args) throws Exception{
-        exhausted();
+        evict();
+
     }
 }

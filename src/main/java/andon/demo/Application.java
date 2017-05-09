@@ -71,7 +71,9 @@ public class Application {
             while(true) {
 
                 try {
+                    //FakeObject object = pool.borrowObject("a");
                     System.out.println(i++ + " active: " + pool.getNumActive("a") + " idle： " + pool.getNumIdle("a"));
+                    //pool.returnObject("a", object);
                     Thread.sleep(1000);
 
                 } catch (Exception e) {
@@ -267,13 +269,12 @@ public class Application {
 
         settings = new Settings(){{
             title = "first";
-            initNum = 5;
+            initNum = 10;
         }};
 
         /**
-         * 如果回收的间隔恰好在SoftMinEvictable和MinEvictable之间， 并且初始元素数（第一次evict之前）比MinIdlePerKey小，
-         * 就会造成一种现象，第一次没有满足清除条件的元素，则补全到MinIdlePerKey，第二次删除除了上一次除了补全意外的所有元素
-         * 但再补全一次，如此往复下去
+         * 全部清除会导致内部数据结构对应key不存在，原本应该有的补全到MinIdlePerKey的操作不会执行，保
+         * 证至少有一个元素不会被清除可以解决这个问题，可以将blockAndCount中注释的代码还原即可看到
          */
         action.accept(pool, settings);
     }
